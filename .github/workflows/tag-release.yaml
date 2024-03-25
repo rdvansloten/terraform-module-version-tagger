@@ -1,0 +1,82 @@
+name: Tag Module Release
+
+on:
+  pull_request:
+    branches:
+      - '*'
+    types: [ closed ]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  process-modules:
+    name: Create tags for changed Terraform modules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set git user
+        run: |
+          git config --global user.email "noreply@rdvansloten.com"
+          git config --global user.name "GitHub Actions"
+
+
+      - name: Create new tags for changed modules (main branch only)
+        if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main'
+        run: |
+          set -e
+          changes_detected=0
+          tag_errors=0
+          Green='\033[0;32m'
+
+          # Define base and head SHA for the PR
+          base_sha=$(git rev-parse "${{ github.event.pull_request.base.sha }}")
+          head_sha=$(git rev-parse "${{ github.event.pull_request.head.sha }}")
+
+          while IFS= read -r filename; do
+              module_name=$(yq e '.name' "$filename")
+              module_version=$(yq e '.version' "$filename")
+              tag_name="module-${module_name}-${module_version}"
+              module_dir=$(dirname "$filename")
+              module_dir=$(realpath --relative-to="$(git rev-parse --show-toplevel)" "$module_dir")
+              
+              echo "Checking changes for module located in $module_dir..."
+
+              if git rev-parse "$tag_name" >/dev/null 2>&1; then
+                  echo "Checking if $tag_name has changes from $tag_name to $head_sha..."
+                  if git diff "$tag_name".."$head_sha" --name-only | grep -q "^${module_dir}/"; then
+                      tag_errors=$((tag_errors + 1))
+                      echo "::error ::Changes detected in $module_dir, but the version in meta.yaml is not bumped beyond $module_version!"
+                  else
+                      echo -e "${Green}No changes detected from $tag_name to $head_sha for $module_dir."
+                  fi
+              else
+                  echo "Checking for actual changes between $base_sha and $head_sha for $module_dir..."
+                  if git diff "$base_sha..$head_sha" --name-only | grep -q "^${module_dir}/"; then
+                      
+                      echo -e "${Green}Changes detected in $module_dir. Tag for version $module_version was not found, creating now..."
+                      changes_detected=1
+                      echo -e "${Green}Creating new tag: $tag_name"
+                      git tag -a "$tag_name" -m "Version $module_version of $module_name"
+                  else
+                      echo -e "${Green}No recent changes detected in $module_dir, skipping."
+                  fi
+              fi
+          done < <(find . -type f -name 'meta.yaml')
+
+          if [ $tag_errors -gt 0 ]; then
+              echo "::error ::Tag errors detected, please fix before continuing."
+              exit 1
+          else
+              git push origin --tags
+          fi
+
+      - name: Skip if not merged to main branch
+        if: github.event.pull_request.merged == true && github.event.pull_request.base.ref != 'main'
+        run: |
+          echo "::notice ::Merge was not performed on main branch, skipping tag creation."
