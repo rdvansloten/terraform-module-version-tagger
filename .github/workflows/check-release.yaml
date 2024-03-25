@@ -1,0 +1,62 @@
+name: Check Module Release
+
+on:
+  pull_request:
+    branches:
+      - '*'
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  process-modules:
+    name: Check for changed Terraform modules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set git user
+        run: |
+          git config --global user.email "noreply@rdvansloten.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Check Module changes and versions
+        id: check_changes
+        run: |
+          set -e
+          changes_detected=0
+          tag_errors=0
+
+          while IFS= read -r filename; do
+            module_name=$(yq e '.name' "$filename")
+            module_version=$(yq e '.version' "$filename")
+            tag_name="module-${module_name}-${module_version}"
+            module_dir=$(dirname "$filename")
+            module_dir=$(realpath --relative-to="$(git rev-parse --show-toplevel)" "$module_dir")
+
+            if git rev-parse "$tag_name" >/dev/null 2>&1; then
+                # The tag exists, check if the module directory has changes
+                if git diff "$tag_name"..HEAD --name-only | grep -q "^${module_dir}/"; then
+                    tag_errors=$((tag_errors + 1))
+                    echo "::error ::Changes detected in $module_dir, but the version in meta.yaml is not bumped beyond $module_version!"
+                fi
+            else
+                # No tag exists, check if there are actual changes
+                if git diff HEAD~1..HEAD --name-only | grep -q "^${module_dir}/"; then
+                    Green='\033[0;32m' 
+                    echo -e "- ${Green}Changes detected in $module_dir. Tag for version $module_version was not found, this will be created on merge."
+                    changes_detected=1
+                fi
+            fi
+          done < <(find . -type f -name 'meta.yaml')
+
+          echo "Total tag errors: $tag_errors"
+
+          if [ $tag_errors -gt 0 ]; then
+            echo "::error ::Tag errors detected, please fix before continuing."
+            exit 1
+          fi
